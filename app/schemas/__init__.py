@@ -9,6 +9,16 @@ from app.schemas.question import (
     ProjectStatus,
     ResearchQuestionSpec,
 )
+from app.schemas.terms import (
+    ConfirmTermsRequest,
+    GenerateTermsRequest,
+    QueryPreview,
+    ReplaceTermsRequest,
+    TermInput,
+    TermHistory,
+    TermRecord,
+    TermTable,
+)
 
 __all__ = [
     "ClarificationQuestion",
@@ -20,5 +30,12 @@ __all__ = [
     "ProjectState",
     "ProjectStatus",
     "ResearchQuestionSpec",
+    "ConfirmTermsRequest",
+    "GenerateTermsRequest",
+    "QueryPreview",
+    "ReplaceTermsRequest",
+    "TermInput",
+    "TermHistory",
+    "TermRecord",
+    "TermTable",
 ]
-

@@ -8,15 +8,21 @@ from fastapi import FastAPI
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from app.api.routes import router
+from app.api.terms import router as terms_router
 from app.config import Settings
 from app.graph.workflow import ClarificationGraph
 from app.repositories.projects import ProjectRepository, create_engine_and_schema
+from app.repositories.terms import TermRepository
 from app.services.clarifier import QuestionAnalyzer
 from app.services.projects import ClarificationProjectService
+from app.services.term_builder import TermBuilder, TermExpander
+from app.services.terms import TermTableService
 
 
 def create_app(
-    settings: Settings | None = None, analyzer: QuestionAnalyzer | None = None
+    settings: Settings | None = None,
+    analyzer: QuestionAnalyzer | None = None,
+    term_expander: TermExpander | None = None,
 ) -> FastAPI:
     app_settings = settings or Settings.from_env()
     app_settings.ensure_directories()
@@ -28,6 +34,7 @@ def create_app(
     checkpointer.setup()
     graph = ClarificationGraph(checkpointer=checkpointer, analyzer=analyzer)
     repository = ProjectRepository(session_factory)
+    term_repository = TermRepository(session_factory)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -36,17 +43,23 @@ def create_app(
         engine.dispose()
 
     app = FastAPI(
-        title="Literature Search Agent - Phase A",
-        version="0.1.0",
-        description="多轮澄清、结构化摘要、显式确认和审计持久化。",
+        title="Literature Search Agent - Phases A+B",
+        version="0.2.0",
+        description="研究问题澄清、可审计检索词表、查询预览与 CSV 导出。",
         lifespan=lifespan,
     )
     app.state.project_service = ClarificationProjectService(repository, graph)
+    app.state.term_service = TermTableService(
+        repository,
+        term_repository,
+        builder=TermBuilder(term_expander),
+    )
     app.include_router(router)
+    app.include_router(terms_router)
 
     @app.get("/health", tags=["system"])
     async def health() -> dict[str, str]:
-        return {"status": "ok", "phase": "A"}
+        return {"status": "ok", "phases": "A,B"}
 
     return app
 

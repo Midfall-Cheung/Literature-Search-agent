@@ -35,7 +35,7 @@ async def test_health(tmp_path: Path) -> None:
     async with make_client(tmp_path) as client:
         assert (await client.get("/health")).json() == {
             "status": "ok",
-            "phases": "A,B",
+            "phases": "A,B,C",
         }
 
 

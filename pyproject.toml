@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "literature-search-agent"
-version = "0.2.0"
-description = "Phases A+B: research-question clarification and auditable search terms"
+version = "0.3.0"
+description = "Phases A+B+C: clarification, auditable terms, and provider query plans"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

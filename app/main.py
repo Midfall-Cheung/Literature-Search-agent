@@ -7,14 +7,17 @@ from typing import AsyncIterator
 from fastapi import FastAPI
 from langgraph.checkpoint.sqlite import SqliteSaver
 
+from app.api.query_plans import router as query_plans_router
 from app.api.routes import router
 from app.api.terms import router as terms_router
 from app.config import Settings
 from app.graph.workflow import ClarificationGraph
 from app.repositories.projects import ProjectRepository, create_engine_and_schema
+from app.repositories.query_plans import QueryPlanRepository
 from app.repositories.terms import TermRepository
 from app.services.clarifier import QuestionAnalyzer
 from app.services.projects import ClarificationProjectService
+from app.services.query_plans import QueryPlanService
 from app.services.term_builder import TermBuilder, TermExpander
 from app.services.terms import TermTableService
 
@@ -35,6 +38,7 @@ def create_app(
     graph = ClarificationGraph(checkpointer=checkpointer, analyzer=analyzer)
     repository = ProjectRepository(session_factory)
     term_repository = TermRepository(session_factory)
+    query_plan_repository = QueryPlanRepository(session_factory)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -43,9 +47,9 @@ def create_app(
         engine.dispose()
 
     app = FastAPI(
-        title="Literature Search Agent - Phases A+B",
-        version="0.2.0",
-        description="研究问题澄清、可审计检索词表、查询预览与 CSV 导出。",
+        title="Literature Search Agent - Phases A+B+C",
+        version="0.3.0",
+        description="研究问题澄清、可审计检索词表与多数据源查询计划编译。",
         lifespan=lifespan,
     )
     app.state.project_service = ClarificationProjectService(repository, graph)
@@ -54,12 +58,18 @@ def create_app(
         term_repository,
         builder=TermBuilder(term_expander),
     )
+    app.state.query_plan_service = QueryPlanService(
+        repository,
+        term_repository,
+        query_plan_repository,
+    )
     app.include_router(router)
     app.include_router(terms_router)
+    app.include_router(query_plans_router)
 
     @app.get("/health", tags=["system"])
     async def health() -> dict[str, str]:
-        return {"status": "ok", "phases": "A,B"}
+        return {"status": "ok", "phases": "A,B,C"}
 
     return app
 

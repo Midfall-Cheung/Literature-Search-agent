@@ -1,6 +1,6 @@
-# Literature Search Agent：阶段 A + B
+# Literature Search Agent：阶段 A + B + C
 
-这是《文献检索 Agent 架构与实施方案》中阶段 A（澄清研究问题）和阶段 B（生成可审计检索词表）的可运行原型。它尚不调用外部学术数据库；当前交付边界止于用户确认词表并生成规范化查询预览。
+这是《文献检索 Agent 架构与实施方案》中阶段 A（澄清研究问题）、阶段 B（生成可审计检索词表）和阶段 C（编译多数据源查询计划）的可运行原型。它尚不调用外部学术数据库；当前交付边界止于用户确认查询计划。
 
 ## 已实现
 
@@ -17,7 +17,9 @@
 - 词表启用/停用、编辑、重新生成、乐观锁和完整版本快照；
 - 概念内 `OR`、概念间 `AND` 的 broad/focused/exact phrase 查询预览；
 - UTF-8 BOM `terms.csv` 导出，便于 Excel 直接打开中文内容；
-- 阶段 A 与 B 的 API、单元测试和断点恢复测试。
+- 为 OpenAlex、Crossref、Semantic Scholar 编译可审计的查询参数；
+- 查询计划草稿、确认、显式覆盖、乐观锁和版本快照；
+- 阶段 A、B、C 的 API、单元测试和断点恢复测试。
 
 ## 快速开始
 
@@ -92,20 +94,46 @@ curl -s -X POST http://127.0.0.1:8000/projects/PROJECT_ID/terms/generate \
 
 `PUT` 使用乐观锁：客户端提交当前 `version` 作为 `expected_version`。修改已确认词表会生成新草稿版本，不会覆盖历史版本。
 
+## 阶段 C API
+
+只有阶段 B 的词表 `status=confirmed` 后才能编译查询计划：
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/projects/PROJECT_ID/query-plans/compile \
+  -H 'Content-Type: application/json' \
+  -d '{"providers":["openalex","crossref","semantic_scholar"],"page_size":100,"max_records":500,"replace_existing":false}'
+```
+
+查询计划接口：
+
+| 方法 | 路径 | 作用 |
+|---|---|---|
+| `POST` | `/projects/{id}/query-plans/compile` | 为选定数据源编译查询计划 |
+| `GET` | `/projects/{id}/query-plans` | 查看当前查询计划和实际请求参数 |
+| `GET` | `/projects/{id}/query-plans/history` | 查看草稿和确认版本快照 |
+| `POST` | `/projects/{id}/confirm-query-plan` | 用 `expected_version` 确认计划 |
+
+OpenAlex 保留标准布尔查询；Semantic Scholar 转换为 bulk search 的 `+`、`|`、`-` 语法；Crossref 的 `query.bibliographic` 不保证布尔语义，因此降级为关键词相关性查询，并在 `notes` 中明确记录限制。阶段 C 只编译和审计请求，不会向这些外部服务发送请求。
+
 ## 目录
 
 ```text
 app/
 ├── api/routes.py              # 阶段 A HTTP 接口
 ├── api/terms.py               # 阶段 B HTTP 接口
+├── api/query_plans.py         # 阶段 C HTTP 接口
+├── providers/compilers.py     # 数据源查询编译器
 ├── graph/workflow.py          # interrupt/resume 状态图
 ├── repositories/projects.py   # SQLite/SQLAlchemy 持久化与版本审计
 ├── repositories/terms.py      # 当前词表与不可变版本快照
+├── repositories/query_plans.py # 当前查询计划与不可变版本快照
 ├── schemas/question.py        # ResearchQuestionSpec 与 API 模型
 ├── schemas/terms.py           # 词、概念、查询预览模型
+├── schemas/query_plans.py     # 数据源查询与计划模型
 ├── services/clarifier.py      # 框架、缺口、提问、合并和摘要规则
 ├── services/term_builder.py   # 词表生成、规范化与查询组合
 ├── services/terms.py          # 阶段 B 业务规则与 CSV 导出
+├── services/query_plans.py    # 阶段 C 门禁、编译和确认规则
 └── main.py                    # 应用装配
 ```
 

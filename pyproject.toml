@@ -4,13 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "literature-search-agent"
-version = "0.3.0"
-description = "Phases A+B+C: clarification, auditable terms, and provider query plans"
+version = "0.5.0"
+description = "Phases A-E: clarification through legal open-fulltext download"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "anyio>=4.6,<4.10",
   "fastapi>=0.115,<0.120",
+  "httpx>=0.28,<1",
   "langgraph>=0.6,<2",
   "langgraph-checkpoint-sqlite>=2.0,<4",
   "pydantic>=2.10,<3",
@@ -20,7 +21,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-  "httpx>=0.28,<1",
   "pytest>=8.3,<10",
   "pytest-cov>=6,<8",
 ]

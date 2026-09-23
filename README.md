@@ -1,6 +1,6 @@
-# Literature Search Agent：阶段 A + B + C
+# Literature Search Agent：阶段 A-E
 
-这是《文献检索 Agent 架构与实施方案》中阶段 A（澄清研究问题）、阶段 B（生成可审计检索词表）和阶段 C（编译多数据源查询计划）的可运行原型。它尚不调用外部学术数据库；当前交付边界止于用户确认查询计划。
+这是《文献检索 Agent 架构与实施方案》中阶段 A（澄清研究问题）、阶段 B（生成可审计检索词表）、阶段 C（编译多数据源查询计划）、阶段 D（多数据源首轮检索）和阶段 E（合法开放全文解析与统一下载）的可运行原型。
 
 ## 已实现
 
@@ -19,7 +19,16 @@
 - UTF-8 BOM `terms.csv` 导出，便于 Excel 直接打开中文内容；
 - 为 OpenAlex、Crossref、Semantic Scholar 编译可审计的查询参数；
 - 查询计划草稿、确认、显式覆盖、乐观锁和版本快照；
-- 阶段 A、B、C 的 API、单元测试和断点恢复测试。
+- OpenAlex、Crossref、Semantic Scholar 分页检索及按数据源隔离失败；
+- 每页持久化原始记录、游标和响应哈希，失败运行可以续跑；
+- DOI、外部标识符、规范化标题与年份的分层去重；
+- 统一文献模型、来源/查询溯源、透明词项相关性评分和 CSV 导出；
+- 元数据、Unpaywall、Europe PMC、arXiv、CORE 顺序全文解析；
+- `selected`、`top_n_oa`、`all_oa` 三种下载策略及批量确认门禁；
+- HTTPS/重定向限制、Content-Type 与 `%PDF-` 双重校验、大小限制；
+- `.part` 原子写入、SHA-256 去重、跨平台安全文件名和 URL token 脱敏；
+- 下载断点续跑、JSONL manifest、失败 CSV 和人工获取状态；
+- 阶段 A-E 的 API、单元测试和断点恢复测试。
 
 ## 快速开始
 
@@ -115,6 +124,55 @@ curl -s -X POST http://127.0.0.1:8000/projects/PROJECT_ID/query-plans/compile \
 
 OpenAlex 保留标准布尔查询；Semantic Scholar 转换为 bulk search 的 `+`、`|`、`-` 语法；Crossref 的 `query.bibliographic` 不保证布尔语义，因此降级为关键词相关性查询，并在 `notes` 中明确记录限制。阶段 C 只编译和审计请求，不会向这些外部服务发送请求。
 
+## 阶段 D API
+
+只有阶段 C 查询计划 `status=confirmed` 且仍对应当前已确认词表时，才能启动检索。默认只执行每个来源的 `broad` 查询：
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/projects/PROJECT_ID/search-runs \
+  -H 'Content-Type: application/json' \
+  -d '{"purposes":["broad"],"max_records_per_query":100}'
+```
+
+| 方法 | 路径 | 作用 |
+|---|---|---|
+| `POST` | `/projects/{id}/search-runs` | 创建并执行一次检索运行 |
+| `GET` | `/projects/{id}/search-runs/{run_id}` | 查看运行、来源和查询统计 |
+| `POST` | `/projects/{id}/search-runs/{run_id}/resume` | 从已保存游标续跑失败或中断任务 |
+| `GET` | `/projects/{id}/works` | 分页查看去重后的文献，可按来源/OA 筛选 |
+| `GET` | `/projects/{id}/exports/works.csv` | 导出 UTF-8 BOM 文献结果表 |
+
+也可以在请求中用 `providers` 选择数据源，或用 `query_ids` 精确选择阶段 C 的查询。`query_ids` 与 `providers` 不能同时提交。运行状态含义：`completed` 全部完成、`partial` 部分来源失败、`failed` 全部失败。
+
+阶段 D 不下载全文。`pdf_url` 只是数据源提供的候选开放地址，验证许可并下载 PDF 属于阶段 E。
+
+## 阶段 E API
+
+建议先用 `selected` 对一篇明确开放的文献做冒烟测试：
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/projects/PROJECT_ID/downloads/estimate \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"selected","work_ids":["WORK_ID"]}'
+
+curl -s -X POST http://127.0.0.1:8000/projects/PROJECT_ID/downloads \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"selected","work_ids":["WORK_ID"]}'
+```
+
+| 方法 | 路径 | 作用 |
+|---|---|---|
+| `POST` | `/projects/{id}/downloads/estimate` | 估算文件数和磁盘占用 |
+| `POST` | `/projects/{id}/downloads` | 创建并执行下载运行 |
+| `GET` | `/projects/{id}/downloads/{run_id}` | 查看逐篇状态和解析尝试 |
+| `POST` | `/projects/{id}/downloads/{run_id}/resume` | 重试失败或未完成项目 |
+| `GET` | `/projects/{id}/downloads/{run_id}/manifest.jsonl` | 下载成功/失败审计清单 |
+| `GET` | `/projects/{id}/downloads/{run_id}/failed.csv` | 下载人工获取与失败报告 |
+
+`all_oa` 必须先查看估算，再在执行请求中明确传入 `"confirm_all_oa": true`。所有成功 PDF 位于 `workspace/projects/{project_id}/papers/`；阶段 E 新增的下载记录、manifest 和 API 响应只保留去除查询参数后的 URL。
+
+完整检测步骤见 [阶段 E 检测指南](docs/阶段E检测指南.md)。
+
 ## 目录
 
 ```text
@@ -122,18 +180,30 @@ app/
 ├── api/routes.py              # 阶段 A HTTP 接口
 ├── api/terms.py               # 阶段 B HTTP 接口
 ├── api/query_plans.py         # 阶段 C HTTP 接口
+├── api/retrieval.py           # 阶段 D HTTP 接口
+├── api/downloads.py           # 阶段 E HTTP 接口
 ├── providers/compilers.py     # 数据源查询编译器
+├── providers/retrievers.py    # 分页检索和来源记录规范化
+├── providers/http.py          # 超时、429/5xx 重试和安全 HTTP 客户端
+├── resolvers/fulltext.py      # 合法开放全文地址解析链
 ├── graph/workflow.py          # interrupt/resume 状态图
 ├── repositories/projects.py   # SQLite/SQLAlchemy 持久化与版本审计
 ├── repositories/terms.py      # 当前词表与不可变版本快照
 ├── repositories/query_plans.py # 当前查询计划与不可变版本快照
+├── repositories/retrieval.py # 运行、原始记录、文献与命中来源
+├── repositories/downloads.py # 下载运行、尝试、文件和 SHA-256 关联
 ├── schemas/question.py        # ResearchQuestionSpec 与 API 模型
 ├── schemas/terms.py           # 词、概念、查询预览模型
 ├── schemas/query_plans.py     # 数据源查询与计划模型
+├── schemas/retrieval.py       # 检索运行、规范化文献和分页模型
+├── schemas/downloads.py       # 下载策略、运行、尝试和文件模型
 ├── services/clarifier.py      # 框架、缺口、提问、合并和摘要规则
 ├── services/term_builder.py   # 词表生成、规范化与查询组合
 ├── services/terms.py          # 阶段 B 业务规则与 CSV 导出
 ├── services/query_plans.py    # 阶段 C 门禁、编译和确认规则
+├── services/retrieval.py      # 阶段 D 执行、评分、查询选择和导出
+├── services/downloads.py      # 阶段 E 编排、去重、manifest 和恢复
+├── services/pdf_downloader.py # 安全流式下载与 PDF 校验
 └── main.py                    # 应用装配
 ```
 
@@ -143,4 +213,4 @@ app/
 
 阶段 B 默认用透明的内置小词表扩展常见中英文术语。生产环境可注入 `StructuredLLMTermExpander`，或用 `CompositeTermExpander` 同时使用规则与模型。模型产生的词会被代码强制标记为 `source=llm`，且不能冒充 MeSH 等受控词表术语。
 
-环境变量见 `.env.example`。默认运行数据写入 `workspace/`，不会写入 API key 或全文内容。
+环境变量见 `.env.example`。阶段 E 建议配置 `UNPAYWALL_EMAIL`，CORE 增强解析需要 `CORE_API_KEY`；arXiv、Europe PMC 和已确认 OA 的元数据地址不需要密钥。密钥只在请求时注入，不写入查询计划、数据库或错误信息。默认运行数据写入 `workspace/`。

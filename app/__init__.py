@@ -1,3 +1,3 @@
-"""Literature Search Agent, Phase A."""
+"""Literature Search Agent, phases A-E."""
 
-__version__ = "0.2.0"
+__version__ = "0.5.0"

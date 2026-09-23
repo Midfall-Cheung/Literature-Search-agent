@@ -76,7 +76,7 @@ class OpenAlexProvider:
                 request_params={
                     "search": item.canonical_query,
                     **({"filter": ",".join(filters)} if filters else {}),
-                    "per-page": page_size,
+                    "per_page": page_size,
                     "cursor": "*",
                 },
                 filters=_audit_filters(spec),

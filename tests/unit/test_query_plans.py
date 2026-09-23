@@ -81,7 +81,7 @@ async def test_compile_confirm_and_audit_query_plan(tmp_path: Path) -> None:
             if item["provider"] == "openalex" and item["purpose"] == "broad"
         )
         assert " OR " in openalex["provider_query"]
-        assert openalex["request_params"]["per-page"] == 100
+        assert openalex["request_params"]["per_page"] == 100
         assert "from_publication_date:2020-01-01" in openalex["request_params"]["filter"]
 
         crossref = next(

@@ -43,7 +43,7 @@ python3 -m venv .venv
 
 打开 <http://127.0.0.1:8000/docs> 使用交互式 API 文档。
 
-## Streamlit 阶段 A 前端
+## Streamlit 阶段 A / B 前端
 
 在现有 Python 3.12 虚拟环境中安装可选 UI 依赖，不需重建环境：
 
@@ -68,7 +68,20 @@ LITERATURE_API_BASE_URL=http://127.0.0.1:8000 .venv/bin/streamlit run frontend/a
 
 确认前可修订研究对象、核心概念、结果、研究类型、年份及语言。结果/研究类型每行一项；语言使用合法代码多选；年份区分整数、尚未指定的空值和明确“不限”。修订后先检查服务端摘要，再点击“确认研究问题”。请求超时可能已保存，先刷新项目核对后再重试。
 
-**目前仅提供阶段 A 页面，B～E 尚未实现 UI；阶段 B 页面属于 P1-02。**
+**目前提供阶段 A 与阶段 B 页面；C～E 尚未实现 UI，本次不执行查询计划、真实检索或下载。**
+
+### 阶段 B：检索词表
+
+加载或创建项目后，通过“工作区”选择“阶段 B”。必须先明确确认阶段 A，才能生成、编辑或确认词表。首次进入只读取状态；点击“生成检索词表”才实际生成。
+
+- 按概念块查看已保存术语及来源、规范词、时间等只读信息；使用“选择术语”逐项编辑，也可增加或移除行。已有词的 ID 和来源保持不变，新词来源为 `user`。
+- 编辑只修改本地草稿；“保存完整词表”发送全部行和草稿基准版本。成功后采用服务器版本。草稿按项目隔离，同一会话的 rerun、页面切换或刷新服务器词表不会覆盖未保存修改。
+- 遇到 409，先“刷新服务器词表（保留草稿）”并展开服务器词表与本地草稿比较。可以勾选后放弃草稿；也可明确授权采用最新版本号再保存完整草稿。后者会覆盖其他编辑，旧 ID 若已失效，仍由后端拒绝，不会自动伪造或转换 ID。
+- “加载查询预览”显示后端返回的查询及词表版本；未保存修改不参与预览。“加载版本历史”只读，不会回滚当前词表。“获取 CSV 导出”后点击“下载 terms.csv”，保留 UTF-8 BOM。
+- 没有未保存修改、且至少两个概念块有启用的非排除术语时，才能明确“确认检索词表”。确认后显示只读快照；重编辑须勾选许可，保存可能使确认失效。
+- 重新生成须勾选覆盖确认，再按“重新生成并覆盖词表”。这会覆盖服务器词表及当前草稿，不会在刷新或页面载入时自动执行。
+
+未保存草稿只存于当前 Streamlit 会话；浏览器刷新、服务重启或新会话可能丢失，请先保存。后端已保存词表可通过项目 ID 重新加载。请求超时后应先刷新比较，避免重复提交。
 
 前端回归测试和编译检查：
 
@@ -78,7 +91,7 @@ p1_test_root=$(mktemp -d /tmp/literature-p1-tests.XXXXXX)
 export LITERATURE_DATABASE_URL="sqlite:///$p1_test_root/import.db"
 export LITERATURE_CHECKPOINT_DB="$p1_test_root/checkpoints.db"
 export LITERATURE_PROJECTS_ROOT="$p1_test_root/projects"
-.venv/bin/python -m pytest tests/unit/test_frontend_api_client.py tests/unit/test_frontend_app.py -q
+.venv/bin/python -m pytest tests/unit/test_frontend_api_client.py tests/unit/test_frontend_app.py tests/unit/test_frontend_terms.py -q
 .venv/bin/python -m pytest -q
 .venv/bin/python -m compileall -q frontend
 ```

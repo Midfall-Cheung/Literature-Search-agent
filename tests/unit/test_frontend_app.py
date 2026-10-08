@@ -233,7 +233,7 @@ def test_phase_a_end_to_end_against_temporary_api(tmp_path):
                     headers={"content-type": "application/json"},
                 )
         response = asyncio.run(send())
-        return httpx.Response(response.status_code, json=response.json())
+        return httpx.Response(response.status_code, content=response.content, headers=response.headers)
 
     client = APIClient(transport=httpx.MockTransport(handle))
     at = make_app(client)
@@ -278,3 +278,254 @@ def test_phase_a_end_to_end_against_temporary_api(tmp_path):
     button(restored, '加载项目').click().run()
     assert not restored.exception
     assert restored.session_state['project_state'] == client.get_state(project_id)
+    restored.selectbox(key='workspace_page').select('阶段 B').run()
+    assert not restored.exception
+    assert term_workspace(restored, project_id)['server']['status'] == 'not_generated'
+    button(restored, '生成检索词表').click().run()
+    assert not restored.exception
+    ws = term_workspace(restored, project_id)
+    assert ws['server']['version'] == 1
+    original_id = ws['draft'][0]['term_id']
+    edit_term(restored, '高校教师P102')
+    button(restored, '保存完整词表').click().run()
+    assert not restored.exception
+    table = client.get_terms(project_id)
+    assert table['version'] == 2
+    assert any(row['term_id'] == original_id and row['term'] == '高校教师P102' for row in table['terms'])
+    button(restored, '加载查询预览').click().run()
+    assert term_workspace(restored, project_id)['preview']['term_set_version'] == 2
+    button(restored, '加载版本历史').click().run()
+    button(restored, '获取 CSV 导出').click().run()
+    assert term_workspace(restored, project_id)['csv'][1][1].startswith(b'\xef\xbb\xbf')
+    button(restored, '确认检索词表').click().run()
+    assert not restored.exception
+    assert client.get_terms(project_id)['status'] == 'confirmed'
+    fresh = make_app(client)
+    fresh.text_input(key='load_project_id').input(project_id)
+    button(fresh, '加载项目').click().run()
+    fresh.selectbox(key='workspace_page').select('阶段 B').run()
+    assert term_workspace(fresh, project_id)['server']['status'] == 'confirmed'
+
+
+def term_table(project_id='project-1', version=1, status='draft'):
+    from uuid import uuid4
+    return {'project_id': project_id, 'version': version, 'status': status, 'concepts': [{'concept_id': 'a'}, {'concept_id': 'b'}], 'terms': [
+        {'term_id': str(uuid4()), 'concept_id': concept, 'concept_name': name, 'term': name, 'language': 'zh', 'term_type': 'preferred', 'source': 'heuristic', 'field_hint': 'title_abstract', 'enabled': True, 'notes': '', 'normalized_term': name}
+        for concept, name in [('a', '教师'), ('b', '人工智能')]
+    ]}
+
+
+class FakeTermsClient(FakeClient):
+    def __init__(self, table=None):
+        initial = state('confirmed')
+        initial['question_spec']['confirmed'] = True
+        super().__init__(initial)
+        self.tables = {'project-1': table or term_table()}
+        self.failures = {}
+    def term_call(self, method, *args):
+        self.calls.append((method, args))
+        if method in self.failures:
+            raise self.failures[method]
+    def get_terms(self, project_id):
+        self.term_call('terms_get', project_id)
+        return deepcopy(self.tables[project_id])
+    def generate_terms(self, project_id, replace_existing=False):
+        self.term_call('terms_generate', project_id, replace_existing)
+        self.tables[project_id] = term_table(project_id, self.tables[project_id]['version'] + 1)
+        return deepcopy(self.tables[project_id])
+    def replace_terms(self, project_id, expected_version, terms):
+        from uuid import uuid4
+        self.term_call('terms_save', project_id, expected_version, terms)
+        table = self.tables[project_id]
+        if expected_version != table['version']:
+            raise APIError('词表版本冲突', 409)
+        table['version'] += 1
+        table['status'] = 'draft'
+        table['terms'] = [dict(row, term_id=row.get('term_id', str(uuid4()))) for row in terms]
+        return deepcopy(table)
+    def confirm_terms(self, project_id, expected_version):
+        self.term_call('terms_confirm', project_id, expected_version)
+        self.tables[project_id]['status'] = 'confirmed'
+        return deepcopy(self.tables[project_id])
+    def get_query_preview(self, project_id):
+        self.term_call('terms_preview', project_id)
+        return {'term_set_version': self.tables[project_id]['version'], 'variants': [{'purpose': 'broad', 'canonical_query': 'BACKEND_QUERY', 'included_concept_ids': ['a', 'b'], 'notes': '后端预览'}]}
+    def get_term_history(self, project_id):
+        self.term_call('terms_history', project_id)
+        return {'versions': [{'version': 1, 'status': 'draft', 'created_at': '2026-01-01', 'snapshot': []}]}
+    def export_terms_csv(self, project_id):
+        self.term_call('terms_csv', project_id)
+        return 'terms.csv', '\ufeffterm\n教师'.encode('utf-8')
+
+
+def open_terms(client):
+    at = make_app(client, loaded=True)
+    at.selectbox(key='workspace_page').select('阶段 B').run()
+    assert not at.exception
+    return at
+
+
+def edit_term(at, value):
+    next(item for item in at.text_input if item.label == '术语').input(value).run()
+    assert not at.exception
+
+
+def term_workspace(at, project_id='project-1'):
+    return at.session_state['term_workspaces'][project_id]
+
+
+def test_b_gate_and_get_never_generates():
+    client = FakeTermsClient()
+    client.state['question_spec']['confirmed'] = False
+    at = open_terms(client)
+    assert not client.calls
+    assert '生成检索词表' not in [item.label for item in at.button]
+    client.state['question_spec']['confirmed'] = True
+    client.tables['project-1'] = {'project_id': 'project-1', 'version': 0, 'status': 'not_generated', 'terms': [], 'concepts': []}
+    at = open_terms(client)
+    at.run()
+    assert [call[0] for call in client.calls] == ['terms_get']
+    button(at, '生成检索词表').click().run()
+    assert not at.exception
+    assert term_workspace(at)['server']['version'] == 1
+    at.run()
+    assert len([call for call in client.calls if call[0] == 'terms_generate']) == 1
+
+
+def test_b_edit_add_remove_save_keeps_ids_sources_and_version():
+    client = FakeTermsClient()
+    original_id = client.tables['project-1']['terms'][0]['term_id']
+    at = open_terms(client)
+    edit_term(at, '高校教师')
+    assert button(at, '确认检索词表').disabled
+    at.selectbox(key='workspace_page').select('阶段 A').run()
+    at.selectbox(key='workspace_page').select('阶段 B').run()
+    assert term_workspace(at)['draft'][0]['term'] == '高校教师'
+    button(at, '增加术语').click().run()
+    edit_term(at, '大学教师')
+    button(at, '保存完整词表').click().run()
+    assert not at.exception
+    saved_call = next(call for call in client.calls if call[0] == 'terms_save')
+    project_id, version, rows = saved_call[1]
+    assert version == 1 and len(rows) == 3
+    assert rows[0]['term_id'] == original_id and rows[0]['source'] == 'heuristic'
+    assert rows[-1]['source'] == 'user' and 'term_id' not in rows[-1]
+    assert all(not {'_key', 'normalized_term', 'created_at', 'updated_at'} & row.keys() for row in rows)
+    assert term_workspace(at)['server']['version'] == 2
+    assert not term_workspace(at)['dirty']
+    button(at, '移除选中术语').click().run()
+    button(at, '保存完整词表').click().run()
+    assert len(term_workspace(at)['server']['terms']) == 2
+    at.run()
+    assert len([call for call in client.calls if call[0] == 'terms_save']) == 2
+
+
+@pytest.mark.parametrize('failure', [APIError('版本冲突', 409), APIError('字段校验失败', 422), APIError('请求超时，先刷新检查')])
+def test_b_failed_save_preserves_draft_and_no_implicit_retry(failure):
+    client = FakeTermsClient()
+    at = open_terms(client)
+    edit_term(at, '我的草稿')
+    client.failures['terms_save'] = failure
+    button(at, '保存完整词表').click().run()
+    assert not at.exception
+    assert term_workspace(at)['draft'][0]['term'] == '我的草稿'
+    assert term_workspace(at)['base_version'] == 1
+    at.run()
+    assert len([call for call in client.calls if call[0] == 'terms_save']) == 1
+    client.tables['project-1']['version'] = 2
+    button(at, '刷新服务器词表（保留草稿）').click().run()
+    assert term_workspace(at)['draft'][0]['term'] == '我的草稿'
+    assert term_workspace(at)['server']['version'] == 2
+    assert term_workspace(at)['base_version'] == 1
+    assert button(at, '保存完整词表').disabled
+    assert any('刷新/比较' in item.value or '版本冲突' in item.value for item in list(at.error) + list(at.warning))
+    next(item for item in at.checkbox if '已比较最新服务器' in item.label).check().run()
+    button(at, '保留草稿并采用最新版本号').click().run()
+    client.failures.clear()
+    button(at, '保存完整词表').click().run()
+    assert not at.exception
+    assert term_workspace(at)['server']['version'] == 3
+
+
+def test_b_preview_history_csv_independent_and_confirm_reload():
+    client = FakeTermsClient()
+    at = open_terms(client)
+    edit_term(at, '未保存术语')
+    button(at, '加载查询预览').click().run()
+    assert term_workspace(at)['preview']['term_set_version'] == 1
+    assert any('未保存修改' in item.value for item in at.warning)
+    client.failures['terms_preview'] = APIError('预览失败', 422)
+    button(at, '加载查询预览').click().run()
+    assert term_workspace(at)['draft'][0]['term'] == '未保存术语'
+    button(at, '加载版本历史').click().run()
+    button(at, '获取 CSV 导出').click().run()
+    assert not at.exception
+    assert term_workspace(at)['history']['versions'][0]['version'] == 1
+    assert term_workspace(at)['csv'][1][1].startswith(b'\xef\xbb\xbf')
+    assert button(at, '确认检索词表').disabled
+    button(at, '保存完整词表').click().run()
+    button(at, '确认检索词表').click().run()
+    assert term_workspace(at)['server']['status'] == 'confirmed'
+    at.run()
+    assert len([call for call in client.calls if call[0] == 'terms_confirm']) == 1
+    reloaded = open_terms(client)
+    assert term_workspace(reloaded)['server']['status'] == 'confirmed'
+    assert '术语' not in [item.label for item in reloaded.text_input]
+
+
+def test_b_two_concepts_gate_and_regeneration_requires_consent():
+    client = FakeTermsClient()
+    client.tables['project-1']['terms'][1]['term_type'] = 'exclusion'
+    at = open_terms(client)
+    assert button(at, '确认检索词表').disabled
+    assert button(at, '重新生成并覆盖词表').disabled
+    at.run()
+    assert not any(call[0] == 'terms_generate' for call in client.calls)
+    next(item for item in at.checkbox if '确认重新生成' in item.label).check().run()
+    button(at, '重新生成并覆盖词表').click().run()
+    assert not at.exception
+    assert ('terms_generate', ('project-1', True)) in client.calls
+
+
+def test_b_projects_do_not_share_drafts():
+    client = FakeTermsClient()
+    at = open_terms(client)
+    edit_term(at, '项目一草稿')
+    client.state['project_id'] = 'project-2'
+    client.tables['project-2'] = term_table('project-2')
+    at.text_input(key='load_project_id').input('project-2')
+    button(at, '加载项目').click().run()
+    assert not at.exception
+    edit_term(at, '项目二草稿')
+    assert term_workspace(at, 'project-1')['draft'][0]['term'] == '项目一草稿'
+    assert term_workspace(at, 'project-2')['draft'][0]['term'] == '项目二草稿'
+    client.state['project_id'] = 'project-1'
+    at.text_input(key='load_project_id').input('project-1')
+    button(at, '加载项目').click().run()
+    assert term_workspace(at)['draft'][0]['term'] == '项目一草稿'
+
+
+def test_b_local_validation_prevents_empty_or_duplicate_put():
+    client = FakeTermsClient()
+    at = open_terms(client)
+    edit_term(at, '')
+    button(at, '保存完整词表').click().run()
+    assert not at.exception
+    assert not any(call[0] == 'terms_save' for call in client.calls)
+    assert term_workspace(at)['dirty']
+    button(at, '增加术语').click().run()
+    edit_term(at, '教师')
+    button(at, '保存完整词表').click().run()
+    assert not any(call[0] == 'terms_save' for call in client.calls)
+
+
+def test_b_regeneration_resets_consent_and_server_error_keeps_state():
+    client = FakeTermsClient()
+    at = open_terms(client)
+    consent = next(item for item in at.checkbox if '确认重新生成' in item.label)
+    consent.check().run()
+    button(at, '重新生成并覆盖词表').click().run()
+    assert not at.exception
+    assert button(at, '重新生成并覆盖词表').disabled
+    at.run()
+    assert len([call for call in client.calls if call[0] == 'terms_generate']) == 1

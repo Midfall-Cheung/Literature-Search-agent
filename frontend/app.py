@@ -18,6 +18,7 @@ import streamlit as st
 
 from app.schemas.question import LANGUAGE_CODES
 from frontend.api_client import APIClient, APIError
+from frontend.terms import render_terms, execute_action, workspace
 
 FIELD_LABELS = {
     "research_objective": "研究目标", "population_or_object": "研究对象",
@@ -41,8 +42,8 @@ def queue_action(action: str, **payload: Any) -> None:
         return
     drafts = {
         key: value for key, value in st.session_state.items()
-        if key in {"original_question", "load_project_id", "revision_field"}
-        or key.startswith(("answer:", "revision:"))
+        if key in {"original_question", "load_project_id", "revision_field", "workspace_page"}
+        or key.startswith(("answer:", "revision:", "term:"))
     }
     st.session_state.action_drafts = drafts
     st.session_state.restore_drafts = drafts
@@ -93,7 +94,9 @@ def run_pending(client: APIClient) -> None:
     action, payload = pending
     try:
         with st.spinner("正在与后端同步…"):
-            if action == "health":
+            if action.startswith("terms_"):
+                execute_action(client, action, payload)
+            elif action == "health":
                 client.health()
                 st.session_state.notice = "后端连接正常"
             else:
@@ -114,6 +117,8 @@ def run_pending(client: APIClient) -> None:
                 # Commit only a successful response, including revisions that reopen clarification.
                 st.session_state.project_state = state
                 st.session_state.project_id = state["project_id"]
+                if action in {"create", "load", "refresh", "confirm"}:
+                    workspace(state["project_id"])["needs_refresh"] = True
                 if action == "create":
                     st.session_state.clear_original = True
                 st.session_state.notice = "操作成功，已显示后端最新状态"
@@ -218,7 +223,7 @@ def render_project(state: dict, busy: bool) -> None:
     elif status == "confirmed":
         st.success("阶段 A 已确认")
         st.text(state.get("summary") or "")
-        st.info("阶段 A 已完成；阶段 B 的前端页面将在 P1-02 实现。")
+        st.info("阶段 A 已完成；阶段 B 检索词表（P1-02）可从工作区入口访问。")
     else:
         st.warning("无法识别后端状态，请刷新项目状态。")
     with st.expander("结构化研究问题", expanded=status == "confirmed"):
@@ -237,11 +242,13 @@ def render_project(state: dict, busy: bool) -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="文献检索 Agent · 阶段 A", page_icon="📚", layout="centered")
-    st.title("文献检索 Agent · 阶段 A：研究问题澄清")
+    st.set_page_config(page_title="文献检索 Agent · 阶段 A / B", page_icon="📚", layout="centered")
+    st.title("文献检索 Agent · 阶段 A / B")
     st.session_state.setdefault("busy", False)
     for key, value in st.session_state.pop("restore_drafts", {}).items():
         st.session_state[key] = value
+    for key in st.session_state.pop("reset_term_consent", []):
+        st.session_state[key] = False
     if st.session_state.pop("clear_original", False):
         st.session_state.original_question = ""
     client = st.session_state.get("_api_client") or APIClient()
@@ -259,7 +266,13 @@ def main() -> None:
         st.form_submit_button("加载项目", disabled=busy, on_click=queue_load)
     st.caption("请保存项目 ID；浏览器刷新后可重新输入 ID 加载。请求超时后先刷新项目，核对是否已保存。")
     if st.session_state.get("project_state"):
-        render_project(st.session_state.project_state, busy)
+        state = st.session_state.project_state
+        st.caption(f"当前项目：{state['project_id']} · 阶段 A 状态：{state['status']}")
+        page = st.selectbox("工作区", ["阶段 A", "阶段 B"], key="workspace_page", disabled=busy)
+        if page == "阶段 A":
+            render_project(state, busy)
+        else:
+            render_terms(state, client, busy, queue_action)
     run_pending(client)
 
 

@@ -81,3 +81,56 @@ def test_incomplete_project_response():
     client = APIClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
     with pytest.raises(APIError, match='后端项目响应不完整'):
         client.get_state('project-1')
+
+
+def test_phase_b_response_kinds_requests_and_binary_export():
+    project_id = '00000000-0000-0000-0000-000000000001'
+    calls = []
+    content = '\ufeffterm\r\n教师\r\n'.encode('utf-8')
+    def handle(request):
+        calls.append((request.method, request.url.path, json.loads(request.content) if request.content else None))
+        if request.url.path.endswith('export.csv'):
+            return httpx.Response(200, content=content, headers={'Content-Disposition': 'attachment; filename="terms_v1.csv"'})
+        if request.url.path.endswith('/history'):
+            data = {'project_id': project_id, 'versions': []}
+        elif request.url.path.endswith('/query-preview'):
+            data = {'project_id': project_id, 'term_set_version': 1, 'variants': []}
+        else:
+            data = {'project_id': project_id, 'status': 'draft', 'version': 1, 'terms': [], 'concepts': []}
+        return httpx.Response(200, json=data)
+    client = APIClient(transport=httpx.MockTransport(handle))
+    assert client.get_terms(project_id)['status'] == 'draft'
+    client.generate_terms(project_id)
+    client.generate_terms(project_id, True)
+    client.replace_terms(project_id, 1, [])
+    assert client.get_query_preview(project_id)['term_set_version'] == 1
+    assert client.get_term_history(project_id)['versions'] == []
+    client.confirm_terms(project_id, 2)
+    assert client.export_terms_csv(project_id) == ('terms_v1.csv', content)
+    assert calls[1][2] == {'replace_existing': False}
+    assert calls[2][2] == {'replace_existing': True}
+    assert calls[3][0] == 'PUT' and calls[3][2] == {'expected_version': 1, 'terms': []}
+    assert calls[6][2] == {'expected_version': 2}
+    assert calls[7][1].endswith('/terms/export.csv')
+
+
+@pytest.mark.parametrize('kind', ['terms', 'preview', 'history'])
+def test_invalid_b_response(kind):
+    client = APIClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    with pytest.raises(APIError, match='词表响应格式异常'):
+        client._request('GET', 'test', response_kind=kind)
+
+
+def test_csv_error_does_not_attempt_download():
+    client = APIClient(transport=httpx.MockTransport(lambda request: httpx.Response(409, json={'detail': '词表版本冲突'})))
+    with pytest.raises(APIError, match='版本冲突'):
+        client.export_terms_csv('project-1')
+
+
+def test_csv_success_never_uses_json_and_unsafe_filename_falls_back():
+    class CSVResponse(httpx.Response):
+        def json(self, **kwargs):
+            raise AssertionError('CSV must not be decoded as JSON')
+    response = CSVResponse(200, content=b'\xef\xbb\xbfdata', headers={'Content-Disposition': 'attachment; filename="bad?token=x.csv"'})
+    client = APIClient(transport=httpx.MockTransport(lambda request: response))
+    assert client.export_terms_csv('project-1') == ('terms.csv', b'\xef\xbb\xbfdata')

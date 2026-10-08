@@ -20,6 +20,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+ui = ["streamlit>=1.40,<2"]
 dev = [
   "pytest>=8.3,<10",
   "pytest-cov>=6,<8",
@@ -29,7 +30,7 @@ dev = [
 literature-clarifier = "app.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["app"]
+packages = ["app", "frontend"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

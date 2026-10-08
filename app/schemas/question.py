@@ -5,7 +5,26 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+# Explicit ISO 639-1 support; adding a language requires a deliberate entry.
+LANGUAGE_ALIASES = {
+    "zh": "zh", "中文": "zh", "chinese": "zh",
+    "en": "en", "英文": "en", "英语": "en", "english": "en",
+    "ja": "ja", "日文": "ja", "日语": "ja", "japanese": "ja",
+    "fr": "fr", "法文": "fr", "法语": "fr", "french": "fr",
+    "de": "de", "德文": "de", "德语": "de", "german": "de",
+    "es": "es", "西班牙语": "es", "spanish": "es",
+    "ko": "ko", "韩语": "ko", "korean": "ko",
+    "ru": "ru", "俄语": "ru", "russian": "ru",
+    "pt": "pt", "葡萄牙语": "pt", "portuguese": "pt",
+    "it": "it", "意大利语": "it", "italian": "it",
+    "ar": "ar", "阿拉伯语": "ar", "arabic": "ar",
+    "hi": "hi", "印地语": "hi", "hindi": "hi",
+}
+LANGUAGE_CODES = frozenset(LANGUAGE_ALIASES.values())
+LANGUAGE_ERROR = "当前问题需要填写语言，例如：中文和英文；不限请回答‘不限’"
 
 
 class Framework(StrEnum):
@@ -62,10 +81,29 @@ class ResearchQuestionSpec(BaseModel):
     explicitly_unrestricted: list[FieldName] = Field(default_factory=list)
     confirmed: bool = False
 
+    @field_validator("languages", mode="before")
+    @classmethod
+    def validate_languages(cls, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            raise ValueError(LANGUAGE_ERROR)
+        normalized: list[str] = []
+        for item in value:
+            if not isinstance(item, str) or item.strip().casefold() not in LANGUAGE_CODES:
+                raise ValueError(LANGUAGE_ERROR)
+            code = item.strip().casefold()
+            if code not in normalized:
+                normalized.append(code)
+        return normalized
+
     @model_validator(mode="after")
     def validate_date_range(self) -> "ResearchQuestionSpec":
         if self.date_from and self.date_to and self.date_from > self.date_to:
             raise ValueError("date_from must be less than or equal to date_to")
+        for field in self.explicitly_unrestricted:
+            value = getattr(self, field.value)
+            empty = "abstract_or_fulltext" if field == FieldName.FULLTEXT_REQUIREMENT else None
+            if value not in (empty, []) and not (empty is None and value == ""):
+                raise ValueError(f"字段 {field.value} 的具体值与“不限”冲突")
         return self
 
 

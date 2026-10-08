@@ -43,6 +43,48 @@ python3 -m venv .venv
 
 打开 <http://127.0.0.1:8000/docs> 使用交互式 API 文档。
 
+## Streamlit 阶段 A 前端
+
+在现有 Python 3.12 虚拟环境中安装可选 UI 依赖，不需重建环境：
+
+```bash
+.venv/bin/python -m pip install -e '.[dev,ui]'
+
+# 终端 1：启动 FastAPI
+.venv/bin/literature-clarifier --reload
+
+# 终端 2：启动 Streamlit
+.venv/bin/streamlit run frontend/app.py
+```
+
+后端默认 <http://127.0.0.1:8000>，前端默认 <http://127.0.0.1:8501>。
+如需连接其他后端，在前端终端配置：
+
+```bash
+LITERATURE_API_BASE_URL=http://127.0.0.1:8000 .venv/bin/streamlit run frontend/app.py
+```
+
+页面支持新建项目、按项目 ID 加载/刷新、多轮自然语言澄清、查看结构化状态和系统假设、单字段修订及明确确认。请保存项目 ID；浏览器刷新后可重新输入 ID 恢复。语言回答直接发送后端解析，例如“我想检索中文和英文文献”，日期可填写“2020—2026”。错误输入会保留草稿并显示后端提示。
+
+确认前可修订研究对象、核心概念、结果、研究类型、年份及语言。结果/研究类型每行一项；语言使用合法代码多选；年份区分整数、尚未指定的空值和明确“不限”。修订后先检查服务端摘要，再点击“确认研究问题”。请求超时可能已保存，先刷新项目核对后再重试。
+
+**目前仅提供阶段 A 页面，B～E 尚未实现 UI；阶段 B 页面属于 P1-02。**
+
+前端回归测试和编译检查：
+
+```bash
+# 隔离 app.main 导入时初始化的默认应用，不使用真实 workspace 数据库
+p1_test_root=$(mktemp -d /tmp/literature-p1-tests.XXXXXX)
+export LITERATURE_DATABASE_URL="sqlite:///$p1_test_root/import.db"
+export LITERATURE_CHECKPOINT_DB="$p1_test_root/checkpoints.db"
+export LITERATURE_PROJECTS_ROOT="$p1_test_root/projects"
+.venv/bin/python -m pytest tests/unit/test_frontend_api_client.py tests/unit/test_frontend_app.py -q
+.venv/bin/python -m pytest -q
+.venv/bin/python -m compileall -q frontend
+```
+
+UI 自动化使用 [Streamlit AppTest](https://docs.streamlit.io/develop/api-reference/app-testing)，后端安装未包含 `ui` 时会跳过 UI 测试，HTTP 客户端测试仍可运行。AppTest 不等同于真实浏览器人工验收；本次开发环境无可用浏览器，已通过临时后端的真实 HTTP + AppTest 完成创建、按当前目标回答六轮、错误语言输入重试、修订结果、确认和新 UI 会话按 ID 恢复，并验证双方服务器健康检查。真实浏览器人工验收尚未执行。
+
 ## API 示例
 
 创建项目：

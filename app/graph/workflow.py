@@ -71,9 +71,18 @@ class ClarificationGraph:
         builder.add_edge("mark_confirmed", END)
         return builder
 
-    def start(self, project_id: str, original_question: str) -> dict[str, Any]:
+    def start(
+        self,
+        project_id: str,
+        original_question: str,
+        initial_spec: ResearchQuestionSpec | None = None,
+    ) -> dict[str, Any]:
         return self.graph.invoke(
             {
+                **(
+                    {"question_spec": initial_spec.model_dump(mode="json")}
+                    if initial_spec is not None else {}
+                ),
                 "project_id": project_id,
                 "original_question": original_question,
                 "clarification_round": 0,
@@ -94,7 +103,11 @@ class ClarificationGraph:
         return {"configurable": {"thread_id": project_id}}
 
     def _analyze_initial_question(self, state: ResearchState) -> ResearchState:
-        spec = self.analyzer.analyze(state["original_question"])
+        spec = (
+            ResearchQuestionSpec.model_validate(state["question_spec"])
+            if "question_spec" in state
+            else self.analyzer.analyze(state["original_question"])
+        )
         return {"question_spec": spec.model_dump(mode="json")}
 
     @staticmethod

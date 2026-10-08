@@ -10,6 +10,8 @@ from app.schemas.question import (
     ProjectStatus,
 )
 
+from app.services.clarifier import apply_field_updates, merge_answer
+
 
 class ProjectNotFoundError(KeyError):
     pass
@@ -25,8 +27,9 @@ class ClarificationProjectService:
         self.graph = graph
 
     def create_project(self, request: CreateProjectRequest) -> ProjectState:
+        spec = self.graph.analyzer.analyze(request.original_question)
         project_id = self.repository.create(request.original_question)
-        self.graph.start(project_id, request.original_question)
+        self.graph.start(project_id, request.original_question, initial_spec=spec)
         self.repository.sync_graph_state(project_id, self.graph.state(project_id))
         return self.repository.get_state(project_id)
 
@@ -34,6 +37,12 @@ class ClarificationProjectService:
         state = self._get(project_id)
         if state.status != ProjectStatus.CLARIFYING or state.current_question is None:
             raise InvalidTransitionError("当前项目不在澄清问答状态")
+        # Reject invalid input before resuming: LangGraph checkpoints the interrupt
+        # payload before the merge node runs, so a failed merge can poison retries.
+        merge_answer(
+            state.question_spec, state.current_question,
+            request.content, request.field_updates,
+        )
         target_fields = [field.value for field in state.current_question.target_fields]
         self.graph.resume(
             project_id,
@@ -47,6 +56,10 @@ class ClarificationProjectService:
         state = self._get(project_id)
         if state.status != ProjectStatus.AWAITING_CONFIRMATION:
             raise InvalidTransitionError("当前项目尚未进入问题确认状态")
+        if request.field_updates:
+            apply_field_updates(state.question_spec, request.field_updates)
+            if request.accepted:
+                raise ValueError("请先使用 accepted=false 修订字段，再确认研究问题")
         self.graph.resume(
             project_id,
             {
@@ -67,6 +80,10 @@ class ClarificationProjectService:
     def _get(self, project_id: str) -> ProjectState:
         try:
             return self.repository.get_state(project_id)
-        except (KeyError, ValueError) as exc:
+        except KeyError as exc:
             raise ProjectNotFoundError(project_id) from exc
+        except ValueError as exc:
+            raise InvalidTransitionError(
+                "历史项目数据校验失败；请备份后显式修复记录及对应 checkpoint，原数据未修改"
+            ) from exc
 

@@ -26,7 +26,10 @@ async def create_project(
     payload: CreateProjectRequest,
     service: ClarificationProjectService = Depends(get_service),
 ) -> ProjectState:
-    return service.create_project(payload)
+    try:
+        return service.create_project(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/{project_id}/state", response_model=ProjectState)
@@ -38,6 +41,8 @@ async def get_project_state(
         return service.get(project_id)
     except ProjectNotFoundError as exc:
         raise HTTPException(status_code=404, detail="项目不存在") from exc
+    except InvalidTransitionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/{project_id}/messages", response_model=ProjectState)

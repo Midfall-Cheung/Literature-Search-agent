@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -12,9 +13,18 @@ def make_client(tmp_path: Path) -> AsyncClient:
     settings = Settings(
         database_url=f"sqlite:///{tmp_path / 'business.db'}",
         checkpoint_database_path=tmp_path / "checkpoints.db",
+        projects_root=tmp_path / "projects",
     )
     app = create_app(settings)
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+def persisted_snapshot(tmp_path: Path) -> tuple[str, str]:
+    dumps = []
+    for name in ("business.db", "checkpoints.db"):
+        with sqlite3.connect(tmp_path / name) as db:
+            dumps.append("\n".join(db.iterdump()))
+    return tuple(dumps)
 
 
 async def answer_current(client: AsyncClient, project_id: str, content: str) -> dict:
@@ -152,6 +162,7 @@ def test_checkpoint_can_resume_after_application_recreation(tmp_path: Path) -> N
     settings = Settings(
         database_url=f"sqlite:///{tmp_path / 'business.db'}",
         checkpoint_database_path=tmp_path / "checkpoints.db",
+        projects_root=tmp_path / "projects",
     )
     first_service = create_app(settings).state.project_service
     created = first_service.create_project(
@@ -165,3 +176,114 @@ def test_checkpoint_can_resume_after_application_recreation(tmp_path: Path) -> N
 
     assert resumed.clarification_round == 1
     assert resumed.question_spec.population_or_object == "高校教师"
+
+
+@pytest.mark.anyio
+async def test_invalid_answer_and_revision_preserve_state_and_resume(tmp_path: Path):
+    async with make_client(tmp_path) as client:
+        state = (await client.post('/projects', json={'original_question': '大语言模型能否改善高校教师的文献检索效率？'})).json()
+        project_id = state['project_id']
+        answers = {'population_or_object': '高校教师', 'intervention_or_exposure': '大语言模型', 'outcomes': '文献检索效率', 'study_types': '不限', 'date_from': '2025—2026', 'languages': '中英文'}
+        while state['status'] == 'clarifying':
+            target = state['current_question']['target_fields'][0]
+            if target == 'languages':
+                before = state
+                persisted = persisted_snapshot(tmp_path)
+                bad = await client.post(f'/projects/{project_id}/messages', json={'content': '[2025,2026]'})
+                assert bad.status_code == 409
+                assert '语言' in bad.json()['detail']
+                state = (await client.get(f'/projects/{project_id}/state')).json()
+                assert state == before
+                assert persisted_snapshot(tmp_path) == persisted
+                # A fresh application must recover the same interrupted checkpoint.
+                async with make_client(tmp_path) as recreated:
+                    state = await answer_current(recreated, project_id, '中英文')
+                break
+            state = await answer_current(client, project_id, answers[target])
+        assert state['status'] == 'awaiting_confirmation'
+        assert state['question_spec']['languages'] == ['zh', 'en']
+        assert (state['question_spec']['date_from'], state['question_spec']['date_to']) == (2025, 2026)
+        before = state
+        persisted = persisted_snapshot(tmp_path)
+        for updates in ({'languages': ['2025']}, {'explicitly_unrestricted': ['languages'], 'languages': ['zh']}, {'unknown': 1}):
+            bad = await client.post(f'/projects/{project_id}/confirm-question', json={'accepted': False, 'field_updates': updates})
+            assert bad.status_code == 409
+            assert (await client.get(f'/projects/{project_id}/state')).json() == before
+            assert persisted_snapshot(tmp_path) == persisted
+        revised = await client.post(f'/projects/{project_id}/confirm-question', json={'accepted': False, 'field_updates': {'outcomes': ['文献检索效率']}})
+        assert revised.status_code == 200
+        assert revised.json()['question_spec']['confirmed'] is False
+        confirmed = await client.post(f'/projects/{project_id}/confirm-question', json={'accepted': True})
+        assert confirmed.status_code == 200
+        assert confirmed.json()['question_spec']['confirmed'] is True
+
+
+@pytest.mark.anyio
+async def test_invalid_initial_dates_do_not_create_partial_project(tmp_path: Path):
+    async with make_client(tmp_path) as client:
+        response = await client.post('/projects', json={'original_question': '研究人工智能，2026-2020'})
+        assert response.status_code == 409
+        with sqlite3.connect(tmp_path / 'business.db') as db:
+            for table in ('projects', 'messages', 'question_specs', 'audit_events'):
+                assert db.execute(f'SELECT count(*) FROM {table}').fetchone()[0] == 0
+
+
+@pytest.mark.anyio
+async def test_dirty_historical_record_is_reported_and_never_rewritten(tmp_path: Path):
+    import json
+    async with make_client(tmp_path) as client:
+        state = (await client.post('/projects', json={'original_question': '研究人工智能'})).json()
+        project_id = state['project_id']
+        dirty = dict(state['question_spec'], languages=['2025', '2026'])
+        encoded = json.dumps(dirty)
+        with sqlite3.connect(tmp_path / 'business.db') as db:
+            db.execute('UPDATE projects SET current_spec=? WHERE id=?', (encoded, project_id))
+        response = await client.get(f'/projects/{project_id}/state')
+        assert response.status_code == 409
+        assert '历史' in response.json()['detail']
+        bad = await client.post(f'/projects/{project_id}/messages', json={'content': '高校教师'})
+        assert bad.status_code == 409
+        with sqlite3.connect(tmp_path / 'business.db') as db:
+            assert db.execute('SELECT current_spec FROM projects WHERE id=?', (project_id,)).fetchone()[0] == encoded
+        clean = (await client.post('/projects', json={'original_question': '研究数字教育'})).json()
+        assert clean['question_spec']['languages'] == []
+
+
+@pytest.mark.anyio
+async def test_invalid_explicit_message_updates_do_not_advance_checkpoint(tmp_path: Path):
+    async with make_client(tmp_path) as client:
+        state = (await client.post('/projects', json={'original_question': '研究人工智能'})).json()
+        project_id = state['project_id']
+        before = persisted_snapshot(tmp_path)
+        for updates in ({'date_from': '2020'}, {'languages': ['2025']}, {'outcomes': [1]}, {'explicitly_unrestricted': 'languages'}, {'confirmed': True}):
+            response = await client.post(f'/projects/{project_id}/messages', json={'content': '修改', 'field_updates': updates})
+            assert response.status_code == 409
+            assert persisted_snapshot(tmp_path) == before
+        async with make_client(tmp_path) as recreated:
+            resumed = await answer_current(recreated, project_id, '高校教师')
+        assert resumed['clarification_round'] == 1
+        assert resumed['question_spec']['population_or_object'] == '高校教师'
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize('answer,expected', [
+    ('只要中文，不纳入英文文献', ['zh']),
+    ('我想检索中文和英文文献', ['zh', 'en']),
+])
+async def test_language_prose_answers_and_invalid_retry(tmp_path: Path, answer, expected):
+    async with make_client(tmp_path) as client:
+        state = (await client.post('/projects', json={
+            'original_question': '对象：教师；核心概念：AI；结果：效率；系统综述，2020-2026'
+        })).json()
+        project_id = state['project_id']
+        assert state['current_question']['target_fields'] == ['languages']
+        before = persisted_snapshot(tmp_path)
+        for invalid in ('[2025,2026]', '中文,abc', '我想检索中文和abc文献'):
+            response = await client.post(f'/projects/{project_id}/messages', json={'content': invalid})
+            assert response.status_code == 409
+            assert persisted_snapshot(tmp_path) == before
+        updated = await answer_current(client, project_id, answer)
+        assert updated['question_spec']['languages'] == expected
+        assert updated['question_spec']['date_from'] == 2020
+        assert updated['question_spec']['date_to'] == 2026
+        assert updated['status'] == 'awaiting_confirmation'

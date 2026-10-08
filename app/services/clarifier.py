@@ -5,6 +5,8 @@ from collections.abc import Mapping
 from typing import Any, Protocol
 
 from app.schemas.question import (
+    LANGUAGE_ALIASES,
+    LANGUAGE_ERROR,
     ClarificationQuestion,
     FieldName,
     Framework,
@@ -49,14 +51,13 @@ original_question 必须原样保留，confirmed 必须为 false。
 {original_question}
 """
         result = self.structured_model.invoke(prompt)
-        parsed = (
-            result
+        data = (
+            result.model_dump(mode="python")
             if isinstance(result, ResearchQuestionSpec)
-            else ResearchQuestionSpec.model_validate(result)
+            else dict(result)
         )
-        return parsed.model_copy(
-            update={"original_question": original_question, "confirmed": False}
-        )
+        data.update(original_question=original_question, confirmed=False)
+        return ResearchQuestionSpec.model_validate(data)
 
 
 class HeuristicQuestionAnalyzer:
@@ -148,24 +149,96 @@ def extract_labelled_fields(text: str) -> dict[str, Any]:
     return updates
 
 
+def parse_date_range(text: str, *, required: bool = True) -> dict[str, Any]:
+    matches = list(re.finditer(r"(?<!\d)\d{4}(?!\d)", text))
+    years = [int(match.group()) for match in matches]
+    error = "未识别到有效年份，请使用如“2020—2026”的格式（年份范围 1500～2100）"
+    if not years:
+        if required:
+            raise ValueError(error)
+        return {}
+    if len(years) > 2:
+        raise ValueError("年份超过两个，请明确填写起止年份范围")
+    if any(year < 1500 or year > 2100 for year in years):
+        raise ValueError(error)
+    if len(years) == 2:
+        connector = text[matches[0].end():matches[1].start()]
+        if re.search(r"[-—–~～至到]", connector):
+            if years[0] > years[1]:
+                raise ValueError("起止年份顺序错误：起始年份不能晚于结束年份")
+            start, end = years
+        else:
+            start, end = sorted(years)
+        return {"date_from": start, "date_to": end}
+    tail = text[matches[0].end():]
+    head = text[:matches[0].start()]
+    if re.match(r"年?\s*[-—–~～至到]", tail) or re.search(r"[-—–~～]\s*$", head):
+        raise ValueError(error)
+    if any(token in text for token in ("以前", "之前", "截至")):
+        return {
+            "date_from": None, "date_to": years[0],
+            "explicitly_unrestricted": ["date_from"],
+        }
+    if required or any(token in text for token in ("以来", "之后", "起")):
+        return {
+            "date_from": years[0], "date_to": None,
+            "explicitly_unrestricted": ["date_to"],
+        }
+    return {}
+
+
+# Keep targeted answers fully consumed: recognizing one valid name must never
+# hide an unknown code or a year. Initial prose uses the same exclusion rules.
+_LANGUAGE_NEGATION = r"不(?:想|希望)?(?:需要|要|纳入|包括|包含|检索|考虑|接受|收录)|排除"
+_LANGUAGE_PATTERN = "|".join(
+    rf"(?<![a-z]){re.escape(alias)}(?![a-z])" if alias.isascii() else re.escape(alias)
+    for alias in sorted(LANGUAGE_ALIASES, key=len, reverse=True)
+)
+_LANGUAGE_WRAPPERS = (
+    r"我想|我希望|希望|想要|想|只要|仅限|仅|只|需要|要|检索|纳入|包括|包含|"
+    r"考虑|接受|收录|使用|文献|文章|研究|语言|的|请|都|和|与|及|\band\b"
+)
+
+
+def parse_language_expression(text: str, *, strict: bool = True) -> list[str]:
+    value = text.casefold().replace("中英文", "中文和英文").replace("中英", "中文和英文")
+    clauses = re.split(r"[,，、;/；。.!！\n]+|但是|但", value)
+    included: list[str] = []
+    excluded: set[str] = set()
+    negative_scope = False
+    for clause in clauses:
+        matches = list(re.finditer(_LANGUAGE_PATTERN, clause))
+        if re.search(_LANGUAGE_NEGATION, clause):
+            negative_scope = True
+        elif re.search(r"只要|仅限|希望|想|检索|纳入|包括|包含|需要", clause):
+            negative_scope = False
+        negative = negative_scope
+        remainder = re.sub(_LANGUAGE_PATTERN, "", clause)
+        remainder = re.sub(_LANGUAGE_NEGATION, "", remainder)
+        remainder = re.sub(_LANGUAGE_WRAPPERS, "", remainder)
+        if strict and remainder.strip():
+            raise ValueError(LANGUAGE_ERROR)
+        for match in matches:
+            code = LANGUAGE_ALIASES[match.group()]
+            if negative:
+                excluded.add(code)
+            elif code not in included:
+                included.append(code)
+    languages = [code for code in included if code not in excluded]
+    if strict and (not languages or excluded.intersection(included)):
+        raise ValueError(LANGUAGE_ERROR + "；请明确希望纳入的语言，避免相互矛盾")
+    return languages
+
+
 def extract_boundaries(text: str) -> dict[str, Any]:
     updates: dict[str, Any] = {}
-    years = [int(value) for value in re.findall(r"(?<!\d)(?:19|20)\d{2}(?!\d)", text)]
-    if len(years) >= 2:
-        updates["date_from"], updates["date_to"] = min(years), max(years)
-    elif len(years) == 1 and any(token in text for token in ("以来", "之后", "起")):
-        updates["date_from"] = years[0]
-        updates["date_to"] = None
+    updates.update(parse_date_range(text, required=False))
 
-    languages: list[str] = []
-    lowered = text.casefold()
-    if "中文" in text or "中英" in text or "chinese" in lowered:
-        languages.append("zh")
-    if "英文" in text or "中英" in text or "english" in lowered:
-        languages.append("en")
+    languages = parse_language_expression(text, strict=False)
     if languages:
         updates["languages"] = languages
 
+    lowered = text.casefold()
     study_type_tokens = {
         "随机对照": "randomized_controlled_trial",
         "系统综述": "systematic_review",
@@ -282,17 +355,9 @@ def parse_answer_for_targets(content: str, targets: list[FieldName]) -> dict[str
     if targets == [FieldName.STUDY_TYPES]:
         return {"study_types": split_values(value)}
     if targets == [FieldName.LANGUAGES]:
-        detected = extract_boundaries(value).get("languages")
-        return {"languages": detected or split_values(value)}
+        return {"languages": parse_language_expression(value)}
     if set(targets) == {FieldName.DATE_FROM, FieldName.DATE_TO}:
-        years = [int(item) for item in re.findall(r"(?<!\d)(?:19|20)\d{2}(?!\d)", value)]
-        if len(years) >= 2:
-            return {"date_from": min(years), "date_to": max(years)}
-        if len(years) == 1:
-            if any(token in value for token in ("以前", "之前", "截至")):
-                return {"date_to": years[0], "explicitly_unrestricted": ["date_from"]}
-            return {"date_from": years[0], "explicitly_unrestricted": ["date_to"]}
-        raise ValueError("未识别到有效年份，请使用如“2020—2026”的格式")
+        return parse_date_range(value)
     if len(targets) == 1:
         return {targets[0].value: value}
     raise ValueError("无法把回答映射到当前问题")
@@ -306,16 +371,27 @@ def apply_field_updates(
         raise ValueError(f"不允许更新字段: {', '.join(sorted(unknown))}")
 
     data = spec.model_dump(mode="python")
-    unrestricted = set(data.get("explicitly_unrestricted", []))
+    unrestricted = set(spec.explicitly_unrestricted)
+    requested = updates.get("explicitly_unrestricted", [])
+    if not isinstance(requested, list):
+        raise ValueError("explicitly_unrestricted 必须是已知字段名列表")
+    requested = {FieldName(item) for item in requested}
+    for field in requested:
+        empty = [] if isinstance(data[field.value], list) else None
+        if field == FieldName.FULLTEXT_REQUIREMENT:
+            empty = "abstract_or_fulltext"
+        if field.value in updates and updates[field.value] != empty:
+            raise ValueError(f"字段 {field.value} 的具体值与“不限”冲突")
+        data[field.value] = empty
     for key, value in updates.items():
         if key == "explicitly_unrestricted":
-            unrestricted.update(FieldName(item) for item in value)
             continue
         data[key] = value
         unrestricted.discard(FieldName(key))
-    data["explicitly_unrestricted"] = list(unrestricted)
+    unrestricted.update(requested)
+    data["explicitly_unrestricted"] = [field for field in FieldName if field in unrestricted]
     data["confirmed"] = False
-    return ResearchQuestionSpec.model_validate(data)
+    return ResearchQuestionSpec.model_validate(data, strict=True)
 
 
 def apply_defaults_for_unresolved(
